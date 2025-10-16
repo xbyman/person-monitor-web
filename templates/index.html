@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人员在岗行为识别与实时告警系统</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <!-- 页面头部 -->
+        <header class="header">
+            <h1>人员在岗行为识别与实时告警系统</h1>
+            <p class="subtitle">基于YOLOv8深度学习的智能监控系统</p>
+        </header>
+
+        <!-- 主要内容区域 -->
+        <main class="main-content">
+            <!-- 视频显示区域 -->
+            <div class="video-section">
+                <div class="video-container">
+                    <img id="video-stream" src="{{ url_for('video_feed') }}" alt="实时视频流" class="video-frame">
+
+                    <!-- 视频加载提示 -->
+                    <div id="loading-overlay" class="loading-overlay">
+                        <div class="loading-spinner"></div>
+                        <p>正在加载视频流...</p>
+                    </div>
+                </div>
+
+                <!-- 视频控制按钮（预留） -->
+                <div class="video-controls">
+                    <button id="refresh-btn" class="control-btn">
+                        🔄 刷新视频
+                    </button>
+                    <button id="fullscreen-btn" class="control-btn">
+                        📺 全屏显示
+                    </button>
+                </div>
+            </div>
+
+            <!-- 状态信息面板 -->
+            <div class="info-panel">
+                <!-- 实时状态 -->
+                <div class="status-card">
+                    <h3>实时状态</h3>
+                    <div class="status-display">
+                        <div id="current-status" class="status-text">系统初始化中...</div>
+                        <div id="status-indicator" class="status-indicator unknown"></div>
+                    </div>
+                    <div class="status-time">
+                        最后更新：<span id="last-update">--</span>
+                    </div>
+                </div>
+
+                <!-- 统计信息 -->
+                <div class="stats-card">
+                    <h3>今日统计</h3>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value" id="total-time">00:00:00</div>
+                            <div class="stat-label">总监控时长</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="on-duty-time">00:00:00</div>
+                            <div class="stat-label">在岗时长</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="alert-count">0</div>
+                            <div class="stat-label">告警次数</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 系统信息 -->
+                <div class="system-card">
+                    <h3>系统信息</h3>
+                    <div class="system-info">
+                        <div class="info-row">
+                            <span class="info-label">检测模型：</span>
+                            <span class="info-value">YOLOv8s</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">视频分辨率：</span>
+                            <span class="info-value" id="resolution">640x480</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">帧率：</span>
+                            <span class="info-value" id="fps">-- FPS</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">系统状态：</span>
+                            <span class="info-value status-online" id="system-status">运行中</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- 页面底部 -->
+        <footer class="footer">
+            <p>&copy; 2025 大学生创新创业项目 - 人员在岗行为识别系统</p>
+            <p>技术栈：YOLOv8 + Flask + OpenCV | 开发团队：创新实验室</p>
+        </footer>
+    </div>
+
+    <!-- JavaScript -->
+    <script>
+        // 全局变量
+        let statusUpdateInterval;
+        let startTime = new Date();
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function () {
+            initializeSystem();
+            setupEventListeners();
+            startStatusUpdates();
+        });
+
+        // 初始化系统
+        function initializeSystem() {
+            console.log('系统初始化中...');
+
+            // 隐藏加载提示
+            setTimeout(() => {
+                const loadingOverlay = document.getElementById('loading-overlay');
+                if (loadingOverlay) {
+                    loadingOverlay.style.display = 'none';
+                }
+            }, 2000);
+        }
+
+        // 设置事件监听器
+        function setupEventListeners() {
+            // 刷新视频按钮
+            const refreshBtn = document.getElementById('refresh-btn');
+            if (refreshBtn) {
+                refreshBtn.addEventListener('click', refreshVideo);
+            }
+
+            // 全屏按钮
+            const fullscreenBtn = document.getElementById('fullscreen-btn');
+            if (fullscreenBtn) {
+                fullscreenBtn.addEventListener('click', toggleFullscreen);
+            }
+
+            // 视频流错误处理
+            const videoStream = document.getElementById('video-stream');
+            if (videoStream) {
+                videoStream.addEventListener('error', handleVideoError);
+                videoStream.addEventListener('load', handleVideoLoad);
+            }
+        }
+
+        // 开始状态更新
+        function startStatusUpdates() {
+            updateStatus(); // 立即更新一次
+            statusUpdateInterval = setInterval(updateStatus, 1000); // 每秒更新
+        }
+
+        // 更新状态信息
+        async function updateStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                // 更新状态显示
+                updateStatusDisplay(data.status);
+                updateLastUpdateTime();
+                updateRunningTime();
+
+            } catch (error) {
+                console.error('状态更新失败:', error);
+                updateStatusDisplay('系统连接异常');
+            }
+        }
+
+        // 更新状态显示
+        function updateStatusDisplay(status) {
+            const statusElement = document.getElementById('current-status');
+            const indicatorElement = document.getElementById('status-indicator');
+
+            if (statusElement) {
+                statusElement.textContent = status;
+            }
+
+            if (indicatorElement) {
+                // 移除所有状态类
+                indicatorElement.className = 'status-indicator';
+
+                // 根据状态添加相应的类
+                if (status.includes('在岗')) {
+                    indicatorElement.classList.add('on-duty');
+                } else if (status.includes('离岗')) {
+                    indicatorElement.classList.add('off-duty');
+                } else {
+                    indicatorElement.classList.add('unknown');
+                }
+            }
+        }
+
+        // 更新最后更新时间
+        function updateLastUpdateTime() {
+            const lastUpdateElement = document.getElementById('last-update');
+            if (lastUpdateElement) {
+                const now = new Date();
+                lastUpdateElement.textContent = now.toLocaleTimeString();
+            }
+        }
+
+        // 更新运行时间
+        function updateRunningTime() {
+            const totalTimeElement = document.getElementById('total-time');
+            if (totalTimeElement) {
+                const now = new Date();
+                const diff = now - startTime;
+                totalTimeElement.textContent = formatDuration(diff);
+            }
+        }
+
+        // 格式化时长
+        function formatDuration(milliseconds) {
+            const seconds = Math.floor(milliseconds / 1000);
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+
+            return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // 刷新视频
+        function refreshVideo() {
+            const videoStream = document.getElementById('video-stream');
+            if (videoStream) {
+                const currentSrc = videoStream.src;
+                videoStream.src = '';
+                setTimeout(() => {
+                    videoStream.src = currentSrc + '?t=' + new Date().getTime();
+                }, 100);
+            }
+        }
+
+        // 切换全屏
+        function toggleFullscreen() {
+            const videoContainer = document.querySelector('.video-container');
+
+            if (!document.fullscreenElement) {
+                videoContainer.requestFullscreen().catch(err => {
+                    console.error('无法进入全屏模式:', err);
+                });
+            } else {
+                document.exitFullscreen();
+            }
+        }
+
+        // 处理视频错误
+        function handleVideoError(event) {
+            console.error('视频流错误:', event);
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (loadingOverlay) {
+                loadingOverlay.innerHTML = '<p style="color: #ff6b6b;">视频流连接失败，请检查系统状态</p>';
+                loadingOverlay.style.display = 'flex';
+            }
+        }
+
+        // 处理视频加载
+        function handleVideoLoad(event) {
+            console.log('视频流加载成功');
+            const loadingOverlay = document.getElementById('loading-overlay');
+            if (loadingOverlay) {
+                loadingOverlay.style.display = 'none';
+            }
+        }
+
+        // 页面卸载时清理
+        window.addEventListener('beforeunload', function () {
+            if (statusUpdateInterval) {
+                clearInterval(statusUpdateInterval);
+            }
+        });
+
+        // 预留的扩展功能
+        function showAnalytics() {
+            // TODO: 显示详细分析数据
+            alert('数据分析功能开发中...');
+        }
+
+        function exportReport() {
+            // TODO: 导出报告
+            alert('报告导出功能开发中...');
+        }
+
+        function configureAlerts() {
+            // TODO: 配置告警设置
+            alert('告警配置功能开发中...');
+        }
+    </script>
+</body>
+
+</html>
