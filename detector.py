@@ -10,12 +10,13 @@ import numpy as np
 from ultralytics import YOLO
 import time
 from utils import calculate_overlap, point_in_rectangle
+import config
 
 
 class DutyDetector:
     """人员在岗检测器类"""
 
-    def __init__(self, model_path="models/yolov8s.pt", confidence_threshold=0.5):
+    def __init__(self, model_path=None, confidence_threshold=None):
         """
         初始化检测器
 
@@ -23,17 +24,18 @@ class DutyDetector:
             model_path (str): YOLOv8模型文件路径
             confidence_threshold (float): 检测置信度阈值
         """
-        self.model_path = model_path
-        self.confidence_threshold = confidence_threshold
+        # 使用配置文件中的默认值
+        self.model_path = model_path or config.MODEL_PATH
+        self.confidence_threshold = confidence_threshold or config.CONFIDENCE_THRESHOLD
         self.model = None
         self.class_names = None
 
         # 状态记录
         self.last_detection_time = time.time()
         self.detection_history = []  # 保存最近的检测历史，用于平滑判断
-        self.max_history_length = 5  # 保存最近5次检测结果
-
-        # 初始化模型
+        self.max_history_length = (
+            config.DETECTION_HISTORY_LENGTH
+        )  # 使用配置的历史记录长度        # 初始化模型
         self._load_model()
 
     def _load_model(self):
@@ -240,7 +242,11 @@ class DutyDetector:
             confidence = chair["confidence"]
 
             cv2.rectangle(
-                annotated_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 0), 2
+                annotated_frame,
+                (bbox[0], bbox[1]),
+                (bbox[2], bbox[3]),
+                config.COLORS["chair_box"],
+                2,
             )
 
             # 标注信息（中文）

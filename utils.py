@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import os
+import config
 
 
 def draw_chinese_text(img, text, position, font_size=30, color=(255, 255, 255)):
@@ -144,8 +145,8 @@ def draw_status_text(
     frame,
     status_text,
     position="top-left",
-    background_color=(0, 0, 0),
-    text_color=(255, 255, 255),
+    background_color=None,
+    text_color=None,
 ):
     """
     在帧上绘制状态文字（支持中文）
@@ -163,11 +164,17 @@ def draw_status_text(
     if frame is None:
         return None
 
+    # 使用配置的默认颜色
+    if background_color is None:
+        background_color = config.COLORS["status_bg"]
+    if text_color is None:
+        text_color = config.COLORS["status_text"]
+
     annotated_frame = frame.copy()
     h, w = frame.shape[:2]
 
     # 设置字体参数
-    font_size = 30
+    font_size = config.STATUS_FONT_SIZE
     padding = 15
 
     # 估算文字尺寸（中文字符大致尺寸）
@@ -326,7 +333,7 @@ class AlertManager:
     def __init__(self):
         """初始化告警管理器"""
         self.alert_history = []
-        self.alert_cooldown = 5.0  # 告警冷却时间（秒）
+        self.alert_cooldown = config.ALERT_COOLDOWN  # 使用配置的告警冷却时间
         self.last_alert_time = 0
 
     def should_trigger_alert(self, status):

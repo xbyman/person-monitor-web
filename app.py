@@ -11,6 +11,7 @@ import threading
 import time
 from detector import DutyDetector
 from utils import draw_status_text
+import config
 
 app = Flask(__name__)
 
@@ -22,29 +23,69 @@ latest_status = "系统初始化中..."
 frame_lock = threading.Lock()
 
 
+def init_camera_source():
+    """智能摄像头源选择"""
+    # 如果启用自动检测
+    if config.AUTO_DETECT_CAMERA:
+        print("正在自动检测可用摄像头...")
+        for i in range(config.MAX_CAMERA_INDEX):
+            print(f"尝试摄像头 {i}...")
+            camera = cv2.VideoCapture(i)
+            if camera.isOpened():
+                # 测试是否能读取帧
+                ret, frame = camera.read()
+                if ret:
+                    print(f"✅ 成功连接摄像头 {i}")
+                    return camera
+                else:
+                    camera.release()
+            print(f"❌ 摄像头 {i} 不可用")
+
+    # 使用配置指定的摄像头源
+    print(f"使用配置的摄像头源: {config.CAMERA_SOURCE}")
+    camera = cv2.VideoCapture(config.CAMERA_SOURCE)
+
+    if camera.isOpened():
+        ret, frame = camera.read()
+        if ret:
+            print("✅ 摄像头连接成功")
+            return camera
+        else:
+            camera.release()
+
+    print("⚠️ 无法连接任何摄像头")
+    return None
+
+
 def init_system():
     """初始化系统组件"""
     global detector, camera
 
     try:
+        # 验证配置
+        if not config.validate_config():
+            return False
+
         # 初始化检测器
         print("正在加载YOLOv8模型...")
-        detector = DutyDetector(model_path="models/yolov8s.pt")
+        detector = DutyDetector(
+            model_path=config.MODEL_PATH,
+            confidence_threshold=config.CONFIDENCE_THRESHOLD,
+        )
         print("模型加载完成")
 
         # 初始化摄像头
         print("正在连接摄像头...")
-        camera = cv2.VideoCapture(0)  # 使用默认摄像头
+        camera = init_camera_source()
 
-        if not camera.isOpened():
-            print("警告：无法打开摄像头，将使用测试视频")
-            # 可以在这里添加测试视频路径
-            # camera = cv2.VideoCapture("test_video.mp4")
+        if camera is None:
+            print("错误：无法连接摄像头")
+            return False
 
         # 设置摄像头参数
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        camera.set(cv2.CAP_PROP_FPS, 30)
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+        camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
 
         print("系统初始化完成")
         return True
@@ -116,7 +157,7 @@ def generate_frames():
                         b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
                     )
 
-        time.sleep(0.033)  # 约30 FPS
+        time.sleep(1.0 / config.STREAM_FPS)  # 使用配置的流输出帧率
 
 
 @app.route("/")
@@ -166,6 +207,20 @@ if __name__ == "__main__":
     print("=" * 50)
     print("人员在岗行为识别与实时告警系统")
     print("=" * 50)
+    print(f"配置信息:")
+    print(f"  摄像头源: {config.CAMERA_SOURCE}")
+    print(f"  分辨率: {config.CAMERA_WIDTH}x{config.CAMERA_HEIGHT}")
+    print(f"  帧率: {config.CAMERA_FPS} FPS")
+    print(f"  服务地址: http://{config.HOST}:{config.PORT}")
+    print(f"  检测阈值: {config.CONFIDENCE_THRESHOLD}")
+    print("-" * 50)
+    print(f"配置信息:")
+    print(f"  摄像头源: {config.CAMERA_SOURCE}")
+    print(f"  分辨率: {config.CAMERA_WIDTH}x{config.CAMERA_HEIGHT}")
+    print(f"  帧率: {config.CAMERA_FPS} FPS")
+    print(f"  服务地址: http://{config.HOST}:{config.PORT}")
+    print(f"  检测阈值: {config.CONFIDENCE_THRESHOLD}")
+    print("-" * 50)
 
     # 初始化系统
     if init_system():
@@ -174,12 +229,14 @@ if __name__ == "__main__":
         capture_thread.start()
 
         print("系统启动成功！")
-        print("访问地址: http://localhost:5000")
+        print(f"访问地址: http://{config.HOST}:{config.PORT}")
         print("按 Ctrl+C 退出系统")
 
         try:
             # 启动Flask应用
-            app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)
+            app.run(
+                debug=config.DEBUG, host=config.HOST, port=config.PORT, threaded=True
+            )
         except KeyboardInterrupt:
             print("\n正在关闭系统...")
         finally:
