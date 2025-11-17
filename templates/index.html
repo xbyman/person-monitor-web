@@ -38,6 +38,9 @@
                     <button id="fullscreen-btn" class="control-btn">
                         📺 全屏显示
                     </button>
+                    <button id="pause-btn" class="control-btn">
+                        ⏸ 暂停检测
+                    </button>
                 </div>
             </div>
 
@@ -111,6 +114,7 @@
         // 全局变量
         let statusUpdateInterval;
         let startTime = new Date();
+        let paused = false;
 
         // 页面加载完成后初始化
         document.addEventListener('DOMContentLoaded', function () {
@@ -146,6 +150,12 @@
                 fullscreenBtn.addEventListener('click', toggleFullscreen);
             }
 
+            // 暂停按钮
+            const pauseBtn = document.getElementById('pause-btn');
+            if (pauseBtn) {
+                pauseBtn.addEventListener('click', togglePause);
+            }
+
             // 视频流错误处理
             const videoStream = document.getElementById('video-stream');
             if (videoStream) {
@@ -167,13 +177,41 @@
                 const data = await response.json();
 
                 // 更新状态显示
+                paused = Boolean(data.paused);
                 updateStatusDisplay(data.status);
+                updatePauseButton();
                 updateLastUpdateTime();
                 updateRunningTime();
 
             } catch (error) {
                 console.error('状态更新失败:', error);
                 updateStatusDisplay('系统连接异常');
+            }
+        }
+
+        function updatePauseButton() {
+            const pauseBtn = document.getElementById('pause-btn');
+            if (!pauseBtn) return;
+
+            if (paused) {
+                pauseBtn.textContent = '▶️ 恢复检测';
+            } else {
+                pauseBtn.textContent = '⏸ 暂停检测';
+            }
+        }
+
+        async function togglePause() {
+            try {
+                const response = await fetch('/api/pause', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ paused: !paused })
+                });
+                const data = await response.json();
+                paused = Boolean(data.paused);
+                updatePauseButton();
+            } catch (error) {
+                console.error('切换暂停状态失败:', error);
             }
         }
 

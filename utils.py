@@ -141,6 +141,109 @@ def calculate_distance(point1, point2):
     return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
 
+def calculate_iou(bbox1, bbox2):
+    """计算两个边界框的IoU (Intersection over Union)"""
+    if bbox1 is None or bbox2 is None:
+        return 0.0
+
+    x1_1, y1_1, x2_1, y2_1 = bbox1
+    x1_2, y1_2, x2_2, y2_2 = bbox2
+
+    x1_inter = max(x1_1, x1_2)
+    y1_inter = max(y1_1, y1_2)
+    x2_inter = min(x2_1, x2_2)
+    y2_inter = min(y2_1, y2_2)
+
+    if x1_inter >= x2_inter or y1_inter >= y2_inter:
+        return 0.0
+
+    inter_area = (x2_inter - x1_inter) * (y2_inter - y1_inter)
+    area1 = max((x2_1 - x1_1), 0) * max((y2_1 - y1_1), 0)
+    area2 = max((x2_2 - x1_2), 0) * max((y2_2 - y1_2), 0)
+    union_area = area1 + area2 - inter_area
+
+    if union_area <= 0:
+        return 0.0
+
+    return inter_area / union_area
+
+
+def estimate_head_pose(nose, left_eye, right_eye, left_ear, right_ear):
+    """使用PnP方法估计头部姿态 (pitch/yaw/roll 单位:度)"""
+    required_points = [nose, left_eye, right_eye, left_ear, right_ear]
+    if any(pt is None for pt in required_points):
+        return None
+
+    model_points = np.array(
+        [
+            (0.0, 0.0, 0.0),  # 鼻尖
+            (-30.0, 65.0, -5.0),  # 左眼
+            (30.0, 65.0, -5.0),  # 右眼
+            (-60.0, 50.0, -20.0),  # 左耳
+            (60.0, 50.0, -20.0),  # 右耳
+        ],
+        dtype=np.float64,
+    )
+
+    image_points = np.array(required_points, dtype=np.float64)
+
+    focal_length = max(image_points[:, 0].max(), image_points[:, 1].max(), 1.0) * 1.5
+    center = (image_points[:, 0].mean(), image_points[:, 1].mean())
+    camera_matrix = np.array(
+        [[focal_length, 0, center[0]], [0, focal_length, center[1]], [0, 0, 1]],
+        dtype=np.float64,
+    )
+
+    dist_coeffs = np.zeros((4, 1))
+
+    try:
+        success, rotation_vec, translation_vec = cv2.solvePnP(
+            model_points,
+            image_points,
+            camera_matrix,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+
+        if not success:
+            return None
+
+        rotation_mat, _ = cv2.Rodrigues(rotation_vec)
+        proj_matrix = np.hstack((rotation_mat, translation_vec))
+        _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(proj_matrix)
+
+        return {
+            "pitch": float(euler_angles[0]),
+            "yaw": float(euler_angles[1]),
+            "roll": float(euler_angles[2]),
+        }
+    except cv2.error:
+        return None
+
+
+def temporal_smoothing(history, window_size=10, threshold=0.7):
+    """对历史状态进行平滑，返回布尔状态"""
+    if not history:
+        return False
+
+    recent = history[-window_size:]
+    positive = sum(1 for status in recent if status)
+    return positive / len(recent) >= threshold
+
+
+def draw_keypoints(frame, keypoints, color=(0, 255, 255)):
+    """在帧上绘制人体关键点"""
+    if frame is None or not keypoints:
+        return frame
+
+    annotated = frame.copy()
+    for point in keypoints.values():
+        if point is None:
+            continue
+        cv2.circle(annotated, (int(point[0]), int(point[1])), 4, color, -1)
+    return annotated
+
+
 def draw_status_text(
     frame,
     status_text,

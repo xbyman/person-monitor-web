@@ -33,16 +33,37 @@ MAX_CAMERA_INDEX = 3  # 最大摄像头索引检测范围
 # =============================================================================
 
 # 模型配置
-MODEL_PATH = "models/yolov8s.pt"  # YOLOv8模型路径
-CONFIDENCE_THRESHOLD = 0.5  # 检测置信度阈值
-DEVICE = "cpu"  # 推理设备 ("cpu" 或 "cuda")
+MODEL_PATH = "models/yolov8x.pt"  # 目标检测模型
+POSE_MODEL_PATH = "models/yolov8n-pose.pt"  # 姿态估计模型
+CONFIDENCE_THRESHOLD = 0.5  # 目标检测置信度
+POSE_CONFIDENCE_THRESHOLD = 0.4  # 姿态估计置信度
+DEVICE = "cuda"  # 推理设备 ("cpu" 或 "cuda")
+
+# 按类别细化的置信度阈值
+CLASS_CONFIDENCE = {
+    "person": 0.5,
+    "chair": 0.45,
+    "monitor": 0.5,
+    "desk": 0.4,
+}
 
 # 状态平滑配置
-STATUS_SMOOTH_FRAMES = 5  # 状态平滑帧数
-DETECTION_HISTORY_LENGTH = 5  # 检测历史记录长度
+STATUS_SMOOTH_FRAMES = 5  # 旧参数，兼容保留
+DETECTION_HISTORY_LENGTH = 5
+SMOOTHING_WINDOW = 10  # 时序平滑窗口
+SMOOTHING_RATIO = 0.6  # 至少60%帧为在岗
 
 # 支持的检测类别
-TARGET_CLASSES = ["person", "chair"]  # 目标检测类别
+TARGET_CLASSES = ["person", "chair", "monitor", "desk"]
+
+# 多条件判定阈值
+CHAIR_IOU_THRESHOLD = 0.2
+DESK_IOU_THRESHOLD = 0.1
+MONITOR_DISTANCE_THRESHOLD = 200  # 像素
+HEAD_ABOVE_MARGIN = 15  # 头部相对椅子顶部偏移
+HEAD_POSE_PITCH_RANGE = (-25.0, 25.0)
+HEAD_POSE_YAW_RANGE = (-30.0, 30.0)
+POSE_ASSOCIATION_IOU = 0.3
 
 # =============================================================================
 # Web服务配置
@@ -62,7 +83,7 @@ THREAD_TIMEOUT = 30  # 线程超时时间（秒）
 
 # MJPEG流配置
 JPEG_QUALITY = 80  # JPEG压缩质量 (1-100)
-STREAM_FPS = 30  # 流输出帧率
+STREAM_FPS = 40  # 流输出帧率
 
 # 视频处理配置
 FRAME_BUFFER_SIZE = 3  # 帧缓冲区大小
@@ -91,6 +112,8 @@ LABEL_FONT_SIZE = 20  # 标签文字大小
 COLORS = {
     "person_box": (0, 255, 0),  # 人员检测框颜色 - 绿色
     "chair_box": (255, 0, 0),  # 椅子检测框颜色 - 蓝色
+    "desk_box": (0, 128, 255),  # 桌面
+    "monitor_box": (255, 255, 0),  # 显示器
     "person_center": (0, 255, 0),  # 人员中心点颜色 - 绿色
     "status_bg": (0, 0, 0),  # 状态背景颜色 - 黑色
     "status_text": (255, 255, 255),  # 状态文字颜色 - 白色
@@ -115,9 +138,8 @@ LOG_FILE_PATH = "logs/system.log"  # 日志文件路径
 # 扩展功能配置（预留）
 # =============================================================================
 
-# OpenPose配置
-ENABLE_POSE_DETECTION = False  # 是否启用姿态检测
-POSE_MODEL_PATH = "models/pose"  # 姿态模型路径
+# OpenPose配置（已由YOLOv8-Pose替换，保留开关供扩展）
+ENABLE_POSE_DETECTION = True  # 是否启用姿态检测
 
 # LSTM配置
 ENABLE_BEHAVIOR_ANALYSIS = False  # 是否启用行为分析
@@ -202,6 +224,10 @@ def get_env_or_default(env_var, default_value, var_type=str):
 CAMERA_SOURCE = get_env_or_default("CAMERA_SOURCE", CAMERA_SOURCE, int)
 CONFIDENCE_THRESHOLD = get_env_or_default(
     "CONFIDENCE_THRESHOLD", CONFIDENCE_THRESHOLD, float
+)
+POSE_MODEL_PATH = get_env_or_default("POSE_MODEL_PATH", POSE_MODEL_PATH, str)
+POSE_CONFIDENCE_THRESHOLD = get_env_or_default(
+    "POSE_CONFIDENCE_THRESHOLD", POSE_CONFIDENCE_THRESHOLD, float
 )
 HOST = get_env_or_default("HOST", HOST, str)
 PORT = get_env_or_default("PORT", PORT, int)

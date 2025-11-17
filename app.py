@@ -5,7 +5,7 @@
 日期：2025年10月16日
 """
 
-from flask import Flask, render_template, Response
+from flask import Flask, render_template, Response, request, jsonify
 import cv2
 import threading
 import time
@@ -21,6 +21,8 @@ camera = None
 latest_frame = None
 latest_status = "系统初始化中..."
 frame_lock = threading.Lock()
+system_paused = False
+pause_lock = threading.Lock()
 
 
 def init_camera_source():
@@ -70,7 +72,10 @@ def init_system():
         print("正在加载YOLOv8模型...")
         detector = DutyDetector(
             model_path=config.MODEL_PATH,
+            pose_model_path=config.POSE_MODEL_PATH,
             confidence_threshold=config.CONFIDENCE_THRESHOLD,
+            pose_confidence_threshold=config.POSE_CONFIDENCE_THRESHOLD,
+            device=config.DEVICE,
         )
         print("模型加载完成")
 
@@ -97,10 +102,17 @@ def init_system():
 
 def capture_frames():
     """视频帧捕获线程"""
-    global latest_frame, latest_status, detector, camera
+    global latest_frame, latest_status, detector, camera, system_paused
 
     while True:
         if camera is not None and camera.isOpened():
+            with pause_lock:
+                paused = system_paused
+
+            if paused:
+                time.sleep(0.2)
+                continue
+
             ret, frame = camera.read()
 
             if ret:
@@ -110,10 +122,14 @@ def capture_frames():
                         detection_result, status = detector.detect(frame)
 
                         # 在帧上绘制检测结果和状态
-                        annotated_frame = detector.draw_detections(
-                            frame, detection_result
-                        )
-                        annotated_frame = draw_status_text(annotated_frame, status)
+                        if detection_result is not None:
+                            annotated_frame = detector.draw_detections(
+                                frame, detection_result, status_text=status
+                            )
+                        else:
+                            annotated_frame = draw_status_text(
+                                frame, status, position="top-left"
+                            )
 
                         with frame_lock:
                             latest_frame = annotated_frame.copy()
@@ -177,8 +193,10 @@ def video_feed():
 @app.route("/status")
 def get_status():
     """获取当前状态的API接口"""
-    global latest_status
-    return {"status": latest_status, "timestamp": time.time()}
+    global latest_status, system_paused
+    with pause_lock:
+        paused = system_paused
+    return {"status": latest_status, "paused": paused, "timestamp": time.time()}
 
 
 @app.route("/api/analytics")
@@ -201,6 +219,17 @@ def trigger_alert():
     """预留的告警接口"""
     # TODO: 实现MQTT告警推送
     return {"alert_sent": False, "message": "MQTT告警模块待开发"}
+
+
+@app.route("/api/pause", methods=["POST"])
+def set_pause_state():
+    """前端控制暂停/恢复检测"""
+    global system_paused
+    data = request.get_json(silent=True) or {}
+    paused = bool(data.get("paused", False))
+    with pause_lock:
+        system_paused = paused
+    return jsonify({"paused": system_paused})
 
 
 if __name__ == "__main__":

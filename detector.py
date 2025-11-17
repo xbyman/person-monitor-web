@@ -1,264 +1,395 @@
 # -*- coding: utf-8 -*-
-"""
-人员在岗检测器 - YOLOv8 核心检测逻辑
-作者：创新创业项目组
-日期：2025年10月16日
-"""
+"""多模态在岗检测 - 目标检测 + 姿态估计 + 多条件融合"""
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import time
-from utils import calculate_overlap, point_in_rectangle
+
 import config
+from utils import (
+    calculate_distance,
+    calculate_iou,
+    draw_chinese_text,
+    draw_keypoints,
+    draw_status_text,
+    estimate_head_pose,
+    temporal_smoothing,
+)
 
 
 class DutyDetector:
-    """人员在岗检测器类"""
+    """融合多模态信息的在岗检测器"""
 
-    def __init__(self, model_path=None, confidence_threshold=None):
-        """
-        初始化检测器
+    KEYPOINT_INDEX = {
+        "nose": 0,
+        "left_eye": 1,
+        "right_eye": 2,
+        "left_ear": 3,
+        "right_ear": 4,
+        "left_shoulder": 5,
+        "right_shoulder": 6,
+        "neck": 7,  # 一些模型没有neck，可回退到肩膀平均值
+    }
 
-        Args:
-            model_path (str): YOLOv8模型文件路径
-            confidence_threshold (float): 检测置信度阈值
-        """
-        # 使用配置文件中的默认值
+    def __init__(
+        self,
+        model_path=None,
+        pose_model_path=None,
+        confidence_threshold=None,
+        pose_confidence_threshold=None,
+        device=None,
+    ):
         self.model_path = model_path or config.MODEL_PATH
+        self.pose_model_path = pose_model_path or config.POSE_MODEL_PATH
         self.confidence_threshold = confidence_threshold or config.CONFIDENCE_THRESHOLD
-        self.model = None
-        self.class_names = None
+        self.pose_confidence_threshold = (
+            pose_confidence_threshold or config.POSE_CONFIDENCE_THRESHOLD
+        )
+        self.device = device or config.DEVICE
 
-        # 状态记录
+        self.model = self._load_model(self.model_path)
+        self.pose_model = self._load_model(self.pose_model_path)
+        self.class_names = self.model.names
+
+        self.on_duty_history = []
+        self.smoothing_window = config.SMOOTHING_WINDOW
+        self.smoothing_ratio = config.SMOOTHING_RATIO
+
         self.last_detection_time = time.time()
-        self.detection_history = []  # 保存最近的检测历史，用于平滑判断
-        self.max_history_length = (
-            config.DETECTION_HISTORY_LENGTH
-        )  # 使用配置的历史记录长度        # 初始化模型
-        self._load_model()
+        self._debug_print_interval = 10.0  # 秒
+        self._last_debug_print_time = 0.0
 
-    def _load_model(self):
-        """加载YOLOv8模型"""
+    def _load_model(self, model_path):
         try:
-            print(f"正在加载模型: {self.model_path}")
-            self.model = YOLO(self.model_path)
-            self.class_names = self.model.names
-            print("模型加载成功")
-            print(f"支持的类别: {list(self.class_names.values())}")
-
-        except Exception as e:
-            print(f"模型加载失败: {str(e)}")
-            # 尝试下载默认模型
-            try:
-                print("尝试下载YOLOv8s模型...")
-                self.model = YOLO("yolov8s.pt")
-                self.class_names = self.model.names
-                print("默认模型下载并加载成功")
-            except Exception as e2:
-                print(f"默认模型加载也失败: {str(e2)}")
-                raise e2
+            model = YOLO(model_path)
+            if self.device:
+                model.to(self.device)
+            print(f"✓ 模型加载成功: {model_path}")
+            return model
+        except Exception as exc:
+            print(f"✗ 模型加载失败 {model_path}: {exc}")
+            raise
 
     def detect(self, frame):
-        """
-        检测帧中的人员和椅子，判断在岗状态
-
-        Args:
-            frame: 输入视频帧
-
-        Returns:
-            tuple: (检测结果, 在岗状态)
-        """
-        if self.model is None:
-            return None, "模型未加载"
+        if frame is None:
+            return None, "输入帧为空"
 
         try:
-            # 使用YOLOv8进行检测
-            results = self.model(frame, conf=self.confidence_threshold, verbose=False)
+            obj_results = self.model(frame, conf=0.25, verbose=False)
+            now = time.time()
+            if now - self._last_debug_print_time >= self._debug_print_interval:
+                print("[Debug] 目标检测原始结果:", obj_results)
+                self._last_debug_print_time = now
+            pose_results = self.pose_model(
+                frame, conf=self.pose_confidence_threshold, verbose=False
+            )
 
-            # 解析检测结果
-            detection_result = self._parse_detections(results[0])
+            detections = self._parse_object_detections(obj_results[0])
+            pose_persons = self._parse_pose_detections(pose_results[0])
+            self._associate_pose_to_persons(detections["persons"], pose_persons)
 
-            # 判断在岗状态
-            duty_status = self._analyze_duty_status(detection_result)
-
-            # 更新检测历史
-            self._update_history(duty_status)
-
-            # 获取平滑后的状态
-            final_status = self._get_smoothed_status()
+            status_detail = self._analyze_duty_status(detections)
+            frame_on_duty = status_detail["frame_on_duty"]
+            self._update_history(frame_on_duty)
+            smoothed_on_duty = temporal_smoothing(
+                self.on_duty_history,
+                window_size=self.smoothing_window,
+                threshold=self.smoothing_ratio,
+            )
+            status_text = self._format_status(status_detail, smoothed_on_duty)
 
             self.last_detection_time = time.time()
+            return detections, status_text
 
-            return detection_result, final_status
+        except Exception as exc:
+            print(f"检测失败: {exc}")
+            return None, f"检测失败: {exc}"
 
-        except Exception as e:
-            print(f"检测过程出错: {str(e)}")
-            return None, f"检测错误: {str(e)}"
+    def _parse_object_detections(self, result):
+        detections = {"persons": [], "chairs": [], "monitors": [], "desks": []}
 
-    def _parse_detections(self, result):
-        """解析YOLO检测结果"""
-        detections = {"persons": [], "chairs": [], "other_objects": []}
+        if result.boxes is None:
+            return detections
 
-        if result.boxes is not None:
-            boxes = result.boxes.xyxy.cpu().numpy()  # 边界框坐标
-            scores = result.boxes.conf.cpu().numpy()  # 置信度
-            classes = result.boxes.cls.cpu().numpy()  # 类别ID
+        boxes = result.boxes.xyxy.cpu().numpy()
+        scores = result.boxes.conf.cpu().numpy()
+        classes = result.boxes.cls.cpu().numpy().astype(int)
 
-            for box, score, cls_id in zip(boxes, scores, classes):
-                cls_name = self.class_names[int(cls_id)]
+        for box, score, cls_id in zip(boxes, scores, classes):
+            cls_name = self._get_class_name(cls_id)
+            class_threshold = config.CLASS_CONFIDENCE.get(
+                cls_name, self.confidence_threshold
+            )
+            if score < class_threshold:
+                continue
+            det = {
+                "bbox": box,
+                "confidence": float(score),
+                "class_id": cls_id,
+                "class_name": cls_name,
+            }
 
-                detection = {
-                    "bbox": box,  # [x1, y1, x2, y2]
-                    "confidence": score,
-                    "class_name": cls_name,
-                    "class_id": int(cls_id),
-                }
-
-                # 根据类别分类存储
-                if cls_name == "person":
-                    detections["persons"].append(detection)
-                elif cls_name == "chair":
-                    detections["chairs"].append(detection)
-                else:
-                    detections["other_objects"].append(detection)
+            if cls_name == "person":
+                detections["persons"].append(det)
+            elif cls_name == "chair":
+                detections["chairs"].append(det)
+            elif cls_name in ("monitor", "tv", "tvmonitor", "laptop"):
+                detections["monitors"].append(det)
+            elif cls_name in ("desk", "table"):
+                detections["desks"].append(det)
 
         return detections
 
-    def _analyze_duty_status(self, detections):
-        """分析在岗状态"""
-        persons = detections["persons"]
-        chairs = detections["chairs"]
+    def _get_class_name(self, cls_id):
+        if isinstance(self.class_names, dict):
+            return self.class_names.get(cls_id, str(cls_id))
+        if isinstance(self.class_names, (list, tuple)) and 0 <= cls_id < len(
+            self.class_names
+        ):
+            return self.class_names[cls_id]
+        return str(cls_id)
 
+    def _parse_pose_detections(self, result):
+        pose_persons = []
+        if result.boxes is None or result.keypoints is None:
+            return pose_persons
+
+        boxes = result.boxes.xyxy.cpu().numpy()
+        confidences = result.boxes.conf.cpu().numpy()
+        keypoints = result.keypoints.xy.cpu().numpy()
+
+        for box, score, kps in zip(boxes, confidences, keypoints):
+            pose_persons.append(
+                {
+                    "bbox": box,
+                    "confidence": float(score),
+                    "keypoints": self._extract_keypoints(kps),
+                }
+            )
+
+        return pose_persons
+
+    def _extract_keypoints(self, keypoint_array):
+        kp_dict = {}
+        for name, idx in self.KEYPOINT_INDEX.items():
+            if idx < len(keypoint_array):
+                point = keypoint_array[idx]
+                if not np.any(np.isnan(point)):
+                    kp_dict[name] = (float(point[0]), float(point[1]))
+                else:
+                    kp_dict[name] = None
+            else:
+                kp_dict[name] = None
+
+        # 补充neck (若不存在则由双肩平均)
+        if kp_dict.get("neck") is None:
+            ls = kp_dict.get("left_shoulder")
+            rs = kp_dict.get("right_shoulder")
+            if ls and rs:
+                kp_dict["neck"] = ((ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2)
+
+        return kp_dict
+
+    def _associate_pose_to_persons(self, persons, pose_persons):
         if not persons:
-            return "未检测到人员"
-
-        if not chairs:
-            return "未检测到椅子"
-
-        # 寻找最佳的人员-椅子匹配
-        on_duty_count = 0
-        total_persons = len(persons)
+            persons.extend(
+                {
+                    "bbox": pose_person["bbox"],
+                    "confidence": pose_person["confidence"],
+                    "class_name": "person",
+                    "keypoints": pose_person["keypoints"],
+                }
+                for pose_person in pose_persons
+            )
+            return
 
         for person in persons:
-            person_center = self._get_bbox_center(person["bbox"])
+            best_match = None
+            best_iou = 0.0
+            for pose_person in pose_persons:
+                iou = calculate_iou(person["bbox"], pose_person["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = pose_person
 
-            # 检查人员中心点是否在任何椅子区域内
-            for chair in chairs:
-                chair_bbox = chair["bbox"]
+            if best_match and best_iou >= config.POSE_ASSOCIATION_IOU:
+                person["keypoints"] = best_match["keypoints"]
 
-                if point_in_rectangle(person_center, chair_bbox):
-                    on_duty_count += 1
-                    break  # 一个人只匹配一把椅子
+    def _analyze_duty_status(self, detections):
+        persons = detections["persons"]
+        if not persons:
+            return {"status": "未检测到人员", "frame_on_duty": False, "details": []}
 
-        # 生成状态描述
-        if on_duty_count == total_persons:
-            return f"在岗 ({on_duty_count}/{total_persons}人)"
+        chairs = detections["chairs"]
+        desks = detections["desks"]
+        monitors = detections["monitors"]
+
+        details = []
+        on_duty_count = 0
+
+        for person in persons:
+            person_status = self._evaluate_person(person, chairs, desks, monitors)
+            if person_status["on_duty"]:
+                on_duty_count += 1
+            details.append(person_status)
+
+        total = len(persons)
+        frame_on_duty = on_duty_count == total and total > 0
+        if on_duty_count == total and total > 0:
+            status = f"在岗 ({on_duty_count}/{total}人)"
         elif on_duty_count > 0:
-            return f"部分在岗 ({on_duty_count}/{total_persons}人)"
+            status = f"部分在岗 ({on_duty_count}/{total}人)"
         else:
-            return f"离岗 ({total_persons}人均不在座位)"
+            status = f"离岗 ({total}人)"
+
+        return {
+            "status": status,
+            "frame_on_duty": frame_on_duty,
+            "details": details,
+        }
+
+    def _evaluate_person(self, person, chairs, desks, monitors):
+        bbox = person["bbox"]
+        keypoints = person.get("keypoints", {}) or {}
+        head_point = keypoints.get("nose") or keypoints.get("neck")
+
+        chair_iou = max(
+            (calculate_iou(bbox, chair["bbox"]) for chair in chairs), default=0.0
+        )
+
+        desk_iou = max(
+            (calculate_iou(bbox, desk["bbox"]) for desk in desks), default=0.0
+        )
+
+        head_above_chair = False
+        if head_point and chairs:
+            for chair in chairs:
+                chair_top = chair["bbox"][1]
+                if head_point[1] < chair_top - config.HEAD_ABOVE_MARGIN:
+                    head_above_chair = True
+                    break
+
+        monitor_near = False
+        if monitors:
+            person_center = self._get_bbox_center(bbox)
+            for monitor in monitors:
+                monitor_center = self._get_bbox_center(monitor["bbox"])
+                dist = calculate_distance(person_center, monitor_center)
+                if dist < config.MONITOR_DISTANCE_THRESHOLD:
+                    monitor_near = True
+                    break
+
+        head_pose = None
+        pose_ok = False
+        if keypoints:
+            head_pose = estimate_head_pose(
+                keypoints.get("nose"),
+                keypoints.get("left_eye"),
+                keypoints.get("right_eye"),
+                keypoints.get("left_ear"),
+                keypoints.get("right_ear"),
+            )
+            if head_pose:
+                pose_ok = (
+                    config.HEAD_POSE_PITCH_RANGE[0]
+                    <= head_pose["pitch"]
+                    <= config.HEAD_POSE_PITCH_RANGE[1]
+                    and config.HEAD_POSE_YAW_RANGE[0]
+                    <= head_pose["yaw"]
+                    <= config.HEAD_POSE_YAW_RANGE[1]
+                )
+
+        conditions = {
+            "chair_iou": chair_iou >= config.CHAIR_IOU_THRESHOLD,
+            "head_above_chair": head_above_chair,
+            "desk_iou": desk_iou >= config.DESK_IOU_THRESHOLD,
+            "monitor_distance": monitor_near,
+            "head_pose": pose_ok,
+        }
+
+        on_duty = any(conditions.values())
+
+        person["keypoints"] = keypoints
+        person["head_pose"] = head_pose
+        person["on_duty"] = on_duty
+        person["conditions"] = conditions
+
+        return {
+            "bbox": bbox,
+            "keypoints": keypoints,
+            "head_pose": head_pose,
+            "conditions": conditions,
+            "on_duty": on_duty,
+        }
+
+    def _update_history(self, frame_on_duty):
+        self.on_duty_history.append(frame_on_duty)
+        if len(self.on_duty_history) > self.smoothing_window:
+            self.on_duty_history.pop(0)
+
+    def _format_status(self, status_detail, smoothed_on_duty):
+        base = status_detail["status"]
+        if smoothed_on_duty:
+            return f"在岗(平滑) - {base}"
+        else:
+            return f"离岗(平滑) - {base}"
 
     def _get_bbox_center(self, bbox):
-        """计算边界框中心点"""
         x1, y1, x2, y2 = bbox
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
-        return (center_x, center_y)
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
-    def _update_history(self, status):
-        """更新检测历史"""
-        self.detection_history.append(status)
-
-        # 保持历史记录长度
-        if len(self.detection_history) > self.max_history_length:
-            self.detection_history.pop(0)
-
-    def _get_smoothed_status(self):
-        """获取平滑处理后的状态（减少抖动）"""
-        if not self.detection_history:
-            return "状态未知"
-
-        # 简单多数投票平滑
-        if len(self.detection_history) < 3:
-            return self.detection_history[-1]
-
-        # 统计最近几次检测中的状态
-        status_counts = {}
-        for status in self.detection_history[-3:]:
-            key = "在岗" if "在岗" in status else "离岗" if "离岗" in status else "其他"
-            status_counts[key] = status_counts.get(key, 0) + 1
-
-        # 返回最多的状态类型，但保留具体信息
-        if status_counts.get("在岗", 0) >= 2:
-            return (
-                self.detection_history[-1]
-                if "在岗" in self.detection_history[-1]
-                else "在岗"
-            )
-        elif status_counts.get("离岗", 0) >= 2:
-            return (
-                self.detection_history[-1]
-                if "离岗" in self.detection_history[-1]
-                else "离岗"
-            )
-        else:
-            return self.detection_history[-1]
-
-    def draw_detections(self, frame, detections):
-        """在帧上绘制检测结果"""
-        if detections is None:
+    def draw_detections(self, frame, detections, status_text=None):
+        if detections is None or frame is None:
             return frame
 
-        annotated_frame = frame.copy()
+        annotated = frame.copy()
 
-        # 绘制人员检测框（绿色）
-        for person in detections["persons"]:
-            bbox = person["bbox"].astype(int)
-            confidence = person["confidence"]
-
-            cv2.rectangle(
-                annotated_frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2
+        for chair in detections.get("chairs", []):
+            annotated = self._draw_box(
+                annotated, chair["bbox"], config.COLORS["chair_box"], "椅子"
             )
 
-            # 绘制人员中心点
-            center = self._get_bbox_center(bbox)
-            cv2.circle(
-                annotated_frame, (int(center[0]), int(center[1])), 5, (0, 255, 0), -1
+        for desk in detections.get("desks", []):
+            annotated = self._draw_box(
+                annotated,
+                desk["bbox"],
+                config.COLORS.get("desk_box", (0, 128, 255)),
+                "桌面",
             )
 
-            # 标注信息（中文）
-            label = f"人员 {confidence:.2f}"
-            # 使用utils中的中文绘制函数
-            from utils import draw_chinese_text
-
-            annotated_frame = draw_chinese_text(
-                annotated_frame, label, (bbox[0], bbox[1] - 30), 20, (0, 255, 0)
+        for monitor in detections.get("monitors", []):
+            annotated = self._draw_box(
+                annotated,
+                monitor["bbox"],
+                config.COLORS.get("monitor_box", (255, 255, 0)),
+                "显示器",
             )
 
-        # 绘制椅子检测框（蓝色）
-        for chair in detections["chairs"]:
-            bbox = chair["bbox"].astype(int)
-            confidence = chair["confidence"]
-
-            cv2.rectangle(
-                annotated_frame,
-                (bbox[0], bbox[1]),
-                (bbox[2], bbox[3]),
-                config.COLORS["chair_box"],
-                2,
+        for idx, person in enumerate(detections.get("persons", []), start=1):
+            bbox = person["bbox"]
+            annotated = self._draw_box(
+                annotated, bbox, config.COLORS["person_box"], f"人员{idx}"
             )
+            if person.get("keypoints"):
+                annotated = draw_keypoints(annotated, person["keypoints"])
+            if person.get("head_pose"):
+                pose = person["head_pose"]
+                text = f"P:{pose['pitch']:.1f} Y:{pose['yaw']:.1f}"
+                x1, y1, _, _ = bbox
+                annotated = draw_chinese_text(
+                    annotated, text, (int(x1), int(y1) - 50), 18, (0, 255, 255)
+                )
 
-            # 标注信息（中文）
-            label = f"椅子 {confidence:.2f}"
-            # 使用utils中的中文绘制函数
-            from utils import draw_chinese_text
+        if status_text:
+            annotated = draw_status_text(annotated, status_text, position="top-left")
 
-            annotated_frame = draw_chinese_text(
-                annotated_frame, label, (bbox[0], bbox[1] - 30), 20, (255, 0, 0)
-            )
+        return annotated
 
-        return annotated_frame
+    def _draw_box(self, frame, bbox, color, label):
+        x1, y1, x2, y2 = map(int, bbox)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        return draw_chinese_text(frame, label, (x1, max(0, y1 - 25)), 18, color)
 
     # 预留扩展方法
     def detect_pose(self, frame):
