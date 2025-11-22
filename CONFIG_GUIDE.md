@@ -36,6 +36,18 @@ on_duty_monitor/
 | `STATUS_SMOOTH_FRAMES` | int | 5 | 状态平滑帧数 |
 | `DETECTION_HISTORY_LENGTH` | int | 5 | 检测历史长度 |
 
+### 🔁 行为序列分析配置
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ENABLE_BEHAVIOR_ANALYSIS` | bool | False | 是否启用LSTM行为分析 |
+| `LSTM_MODEL_PATH` | str | "models/lstm" | 自定义LSTM模型路径或目录 |
+| `BEHAVIOR_SEQUENCE_LENGTH` | int | 30 | 特征序列长度 |
+| `BEHAVIOR_FEATURE_SIZE` | int | 12 | 单帧特征长度（需与模型一致） |
+| `LSTM_ON_DUTY_THRESHOLD` | float | 0.6 | LSTM概率判定阈值 |
+| `LSTM_FUSION_WEIGHT` | float | 0.5 | LSTM概率在最终决策中的权重 |
+| `LSTM_FUSION_THRESHOLD` | float | 0.5 | 融合得分阈值 |
+
 ### 🌐 Web服务配置
 
 | 参数 | 类型 | 默认值 | 说明 |

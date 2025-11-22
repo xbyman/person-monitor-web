@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import time
+from collections import deque
 
 import config
 from utils import (
@@ -56,6 +57,16 @@ class DutyDetector:
         self.smoothing_window = config.SMOOTHING_WINDOW
         self.smoothing_ratio = config.SMOOTHING_RATIO
 
+        self.enable_behavior_analysis = config.ENABLE_BEHAVIOR_ANALYSIS
+        self.behavior_feature_size = getattr(config, "BEHAVIOR_FEATURE_SIZE", 12)
+        self.behavior_sequence = deque(maxlen=config.BEHAVIOR_SEQUENCE_LENGTH)
+        self.behavior_analyzer = None
+        self.last_lstm_score = None
+        self.lstm_threshold = getattr(config, "LSTM_ON_DUTY_THRESHOLD", 0.6)
+        self.lstm_fusion_weight = getattr(config, "LSTM_FUSION_WEIGHT", 0.5)
+        self.lstm_fusion_threshold = getattr(config, "LSTM_FUSION_THRESHOLD", 0.5)
+        self._initialize_behavior_analyzer()
+
         self.last_detection_time = time.time()
         self._debug_print_interval = 10.0  # 秒
         self._last_debug_print_time = 0.0
@@ -97,14 +108,16 @@ class DutyDetector:
                 window_size=self.smoothing_window,
                 threshold=self.smoothing_ratio,
             )
-            status_text = self._format_status(status_detail, smoothed_on_duty)
+            lstm_result = self._maybe_run_behavior_analysis(status_detail, detections)
+            fused_on_duty = self._fuse_on_duty(smoothed_on_duty, lstm_result)
+            status_text = self._format_status(status_detail, fused_on_duty, lstm_result)
 
             self.last_detection_time = time.time()
-            return detections, status_text
+            return detections, status_text, status_detail
 
         except Exception as exc:
             print(f"检测失败: {exc}")
-            return None, f"检测失败: {exc}"
+            return None, f"检测失败: {exc}", None
 
     def _parse_object_detections(self, result):
         detections = {"persons": [], "chairs": [], "monitors": [], "desks": []}
@@ -300,6 +313,18 @@ class DutyDetector:
                     <= config.HEAD_POSE_YAW_RANGE[1]
                 )
 
+        closest_monitor_distance = None
+        if monitors:
+            person_center = self._get_bbox_center(bbox)
+            min_distance = float("inf")
+            for monitor in monitors:
+                monitor_center = self._get_bbox_center(monitor["bbox"])
+                dist = calculate_distance(person_center, monitor_center)
+                if dist < min_distance:
+                    min_distance = dist
+            if min_distance != float("inf"):
+                closest_monitor_distance = min_distance
+
         conditions = {
             "chair_iou": chair_iou >= config.CHAIR_IOU_THRESHOLD,
             "head_above_chair": head_above_chair,
@@ -310,10 +335,17 @@ class DutyDetector:
 
         on_duty = any(conditions.values())
 
+        metrics = {
+            "chair_iou": chair_iou,
+            "desk_iou": desk_iou,
+            "monitor_distance": closest_monitor_distance,
+        }
+
         person["keypoints"] = keypoints
         person["head_pose"] = head_pose
         person["on_duty"] = on_duty
         person["conditions"] = conditions
+        person["metrics"] = metrics
 
         return {
             "bbox": bbox,
@@ -321,6 +353,7 @@ class DutyDetector:
             "head_pose": head_pose,
             "conditions": conditions,
             "on_duty": on_duty,
+            "metrics": metrics,
         }
 
     def _update_history(self, frame_on_duty):
@@ -328,12 +361,155 @@ class DutyDetector:
         if len(self.on_duty_history) > self.smoothing_window:
             self.on_duty_history.pop(0)
 
-    def _format_status(self, status_detail, smoothed_on_duty):
+    def _initialize_behavior_analyzer(self):
+        if not self.enable_behavior_analysis:
+            return
+        try:
+            from lstm_analyzer import AnalyzerConfig, BehaviorAnalyzer
+
+            analyzer_config = AnalyzerConfig(
+                model_path=config.LSTM_MODEL_PATH,
+                sequence_length=config.BEHAVIOR_SEQUENCE_LENGTH,
+                feature_size=self.behavior_feature_size,
+                device=self.device or "cpu",
+                enable_logging=config.ENABLE_DEBUG_MODE,
+            )
+            self.behavior_analyzer = BehaviorAnalyzer(analyzer_config)
+            print("✓ 行为序列分析模块已启用")
+        except Exception as exc:
+            print(f"⚠️ 行为序列分析模块初始化失败: {exc}")
+            self.behavior_analyzer = None
+            self.enable_behavior_analysis = False
+
+    def _maybe_run_behavior_analysis(self, status_detail, detections):
+        if not self.behavior_analyzer:
+            return None
+        features = self._extract_frame_features(status_detail, detections)
+        if not features:
+            return None
+        normalized = self._normalize_feature_vector(features)
+        self.behavior_sequence.append(normalized)
+        ready = len(self.behavior_sequence) == self.behavior_sequence.maxlen
+        if not ready:
+            return {"probability": None, "ready": False, "on_duty": None}
+        sequence = list(self.behavior_sequence)
+        try:
+            probability = self.behavior_analyzer.predict(sequence)
+        except Exception as exc:
+            print(f"⚠️ 行为序列分析失败: {exc}")
+            return None
+        self.last_lstm_score = probability
+        return {
+            "probability": probability,
+            "ready": True,
+            "on_duty": probability >= self.lstm_threshold,
+        }
+
+    def _extract_frame_features(self, status_detail, detections):
+        persons = status_detail.get("details", [])
+        total_persons = len(persons)
+        chair_presence = 1.0 if detections.get("chairs") else 0.0
+        monitor_presence = 1.0 if detections.get("monitors") else 0.0
+        if total_persons == 0:
+            return [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                chair_presence,
+                monitor_presence,
+            ]
+
+        ratio = lambda count: count / total_persons if total_persons else 0.0
+
+        on_duty_ratio = ratio(sum(1 for p in persons if p.get("on_duty")))
+        monitor_ratio = ratio(
+            sum(1 for p in persons if p.get("conditions", {}).get("monitor_distance"))
+        )
+        pose_ok_ratio = ratio(
+            sum(1 for p in persons if p.get("conditions", {}).get("head_pose"))
+        )
+        avg_chair_iou = self._average_metric(persons, "chair_iou")
+        avg_desk_iou = self._average_metric(persons, "desk_iou")
+        avg_monitor_distance = self._average_metric(persons, "monitor_distance")
+        monitor_distance_score = (
+            1.0 / (1.0 + (avg_monitor_distance / 500.0))
+            if avg_monitor_distance and avg_monitor_distance > 0
+            else 0.0
+        )
+        pitch_values = [
+            p["head_pose"]["pitch"]
+            for p in persons
+            if p.get("head_pose") and p["head_pose"].get("pitch") is not None
+        ]
+        yaw_values = [
+            p["head_pose"]["yaw"]
+            for p in persons
+            if p.get("head_pose") and p["head_pose"].get("yaw") is not None
+        ]
+        avg_pitch_norm = self._safe_mean(pitch_values) / 90.0
+        avg_yaw_norm = self._safe_mean(yaw_values) / 90.0
+        frame_on_duty_flag = 1.0 if status_detail.get("frame_on_duty") else 0.0
+
+        features = [
+            float(total_persons),
+            on_duty_ratio,
+            avg_chair_iou,
+            avg_desk_iou,
+            monitor_ratio,
+            monitor_distance_score,
+            avg_pitch_norm,
+            avg_yaw_norm,
+            pose_ok_ratio,
+            frame_on_duty_flag,
+            chair_presence,
+            monitor_presence,
+        ]
+        return features
+
+    def _normalize_feature_vector(self, vector):
+        vector = list(vector)
+        size = self.behavior_feature_size
+        if len(vector) > size:
+            return vector[:size]
+        if len(vector) < size:
+            vector = list(vector) + [0.0] * (size - len(vector))
+        return vector
+
+    def _average_metric(self, persons, metric_key):
+        values = []
+        for person in persons:
+            metrics = person.get("metrics") or {}
+            value = metrics.get(metric_key)
+            if value is not None:
+                values.append(value)
+        return float(np.mean(values)) if values else 0.0
+
+    def _safe_mean(self, values):
+        if not values:
+            return 0.0
+        return float(np.mean(values))
+
+    def _fuse_on_duty(self, smoothed_on_duty, lstm_result):
+        if not lstm_result or lstm_result.get("probability") is None:
+            return smoothed_on_duty
+        heur_score = 1.0 if smoothed_on_duty else 0.0
+        fused_score = heur_score * (1.0 - self.lstm_fusion_weight)
+        fused_score += lstm_result["probability"] * self.lstm_fusion_weight
+        return fused_score >= self.lstm_fusion_threshold
+
+    def _format_status(self, status_detail, fused_on_duty, lstm_result=None):
         base = status_detail["status"]
-        if smoothed_on_duty:
-            return f"在岗(平滑) - {base}"
-        else:
-            return f"离岗(平滑) - {base}"
+        prefix = "在岗(融合)" if fused_on_duty else "离岗(融合)"
+        if lstm_result and lstm_result.get("probability") is not None:
+            prefix += f" LSTM:{lstm_result['probability']:.2f}"
+        return f"{prefix} - {base}"
 
     def _get_bbox_center(self, bbox):
         x1, y1, x2, y2 = bbox

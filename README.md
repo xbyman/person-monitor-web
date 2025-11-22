@@ -18,10 +18,10 @@
 - ✅ **Web实时展示**：Flask驱动的网页实时视频流
 - ✅ **状态监控**：实时显示在岗/离岗状态
 - ✅ **响应式界面**：适配PC和移动设备
+- ✅ **LSTM行为序列分析**：使用时序特征+LSTM输出更稳健的在岗概率
 
 ### 预留扩展
 - 🚧 **姿态估计**：OpenPose集成接口
-- 🚧 **行为序列分析**：LSTM时序分析
 - 🚧 **智能告警**：MQTT推送、邮件通知
 - 🚧 **数据统计**：在岗时长、效率分析
 - 🚧 **多人监控**：支持多人同时监控
@@ -133,6 +133,21 @@ CAMERA_SOURCE = "test_video.mp4"
 - 🟡 **未知**：未检测到人员或椅子
 
 ### 性能优化
+
+## LSTM行为序列分析
+
+LSTM模块会收集每帧的 12 维特征（人员数、在岗占比、IoU、头部姿态、监视器距离等），形成连续序列并交由轻量级LSTM输出更平滑的在岗概率。
+
+1. 在 `config.py` 中开启 `ENABLE_BEHAVIOR_ANALYSIS = True`
+2. 可选地为 `LSTM_MODEL_PATH` 指定自定义的 `.pt/.pth` 模型；否则系统使用内建 `SimpleBehaviorLSTM`
+3. 根据需要调整 `BEHAVIOR_SEQUENCE_LENGTH`、`BEHAVIOR_FEATURE_SIZE`、`LSTM_*` 阈值
+4. 使用离线脚本验证模型：
+
+```bash
+python behavior_demo.py --verbose
+```
+
+当行为模块就绪时，状态栏会显示 `LSTM:0.xx` 概率，并与传统平滑结果进行权重融合。
 - 推荐使用YOLOv8s模型（默认）
 - 建议摄像头分辨率：640x480
 - 目标帧率：20-30 FPS

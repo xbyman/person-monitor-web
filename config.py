@@ -145,16 +145,10 @@ ENABLE_POSE_DETECTION = True  # 是否启用姿态检测
 ENABLE_BEHAVIOR_ANALYSIS = False  # 是否启用行为分析
 LSTM_MODEL_PATH = "models/lstm"  # LSTM模型路径
 BEHAVIOR_SEQUENCE_LENGTH = 30  # 行为序列长度
-
-# 告警配置
-ENABLE_ALERT = True  # 是否启用告警
-ALERT_COOLDOWN = 5.0  # 告警冷却时间（秒）
-ALERT_METHODS = ["log"]  # 告警方式: log, mqtt, email, webhook
-
-# MQTT配置
-MQTT_BROKER = "localhost"  # MQTT服务器地址
-MQTT_PORT = 1883  # MQTT端口
-MQTT_TOPIC = "duty_monitor/alert"  # MQTT主题
+BEHAVIOR_FEATURE_SIZE = 12  # 单帧特征维度
+LSTM_ON_DUTY_THRESHOLD = 0.6  # LSTM输出阈值
+LSTM_FUSION_WEIGHT = 0.5  # 与传统平滑结果融合的权重
+LSTM_FUSION_THRESHOLD = 0.5  # 融合结果阈值
 
 # =============================================================================
 # 性能优化配置
@@ -189,6 +183,29 @@ ENABLE_MOCK_CAMERA = False  # 是否启用模拟摄像头
 # 统计配置
 ENABLE_STATISTICS = True  # 是否启用统计
 STATS_UPDATE_INTERVAL = 1.0  # 统计更新间隔（秒）
+STATUS_REFRESH_INTERVAL = 1.0  # 前端状态刷新间隔（秒）
+STATS_DB_PATH = "data/monitor_stats.db"  # 监测统计数据库路径
+STATS_PERSIST_INTERVAL = 60  # 写入数据库的时间间隔（秒）
+STATS_CSV_PATH = "data/monitor_stats.csv"  # 可读的CSV导出文件
+
+# =============================================================================
+# 健康守护与时间同步配置
+# =============================================================================
+
+# 工作时段统计
+WORK_HOURS_ENABLED = True  # 是否启用工作时段过滤
+WORK_DAYS = [0, 1, 2, 3, 4, 5, 6]  # 允许统计的工作日（周一=0）
+WORK_HOURS_START = "09:00"  # 工作开始时间（24小时制）
+WORK_HOURS_END = "22:00"  # 工作结束时间
+
+# 连续工作提醒
+CONTINUOUS_WORK_THRESHOLD = 30  # 连续在岗阈值（秒）
+
+# 联网时间同步
+ENABLE_TIME_SYNC = True  # 是否启用联网时间同步
+TIME_SYNC_API = "https://worldtimeapi.org/api/ip"  # 时间源API
+TIME_SYNC_INTERVAL = 30 * 60  # 同步间隔（秒）
+TIME_SYNC_TIMEOUT = 5  # 同步请求超时（秒）
 
 # =============================================================================
 # 环境变量支持
@@ -232,6 +249,24 @@ POSE_CONFIDENCE_THRESHOLD = get_env_or_default(
 HOST = get_env_or_default("HOST", HOST, str)
 PORT = get_env_or_default("PORT", PORT, int)
 DEBUG = get_env_or_default("DEBUG", DEBUG, bool)
+STATUS_REFRESH_INTERVAL = get_env_or_default(
+    "STATUS_REFRESH_INTERVAL", STATUS_REFRESH_INTERVAL, float
+)
+STATS_DB_PATH = get_env_or_default("STATS_DB_PATH", STATS_DB_PATH, str)
+STATS_PERSIST_INTERVAL = get_env_or_default(
+    "STATS_PERSIST_INTERVAL", STATS_PERSIST_INTERVAL, float
+)
+STATS_CSV_PATH = get_env_or_default("STATS_CSV_PATH", STATS_CSV_PATH, str)
+WORK_HOURS_ENABLED = get_env_or_default("WORK_HOURS_ENABLED", WORK_HOURS_ENABLED, bool)
+WORK_HOURS_START = get_env_or_default("WORK_HOURS_START", WORK_HOURS_START, str)
+WORK_HOURS_END = get_env_or_default("WORK_HOURS_END", WORK_HOURS_END, str)
+CONTINUOUS_WORK_THRESHOLD = get_env_or_default(
+    "CONTINUOUS_WORK_THRESHOLD", CONTINUOUS_WORK_THRESHOLD, float
+)
+ENABLE_TIME_SYNC = get_env_or_default("ENABLE_TIME_SYNC", ENABLE_TIME_SYNC, bool)
+TIME_SYNC_API = get_env_or_default("TIME_SYNC_API", TIME_SYNC_API, str)
+TIME_SYNC_INTERVAL = get_env_or_default("TIME_SYNC_INTERVAL", TIME_SYNC_INTERVAL, int)
+TIME_SYNC_TIMEOUT = get_env_or_default("TIME_SYNC_TIMEOUT", TIME_SYNC_TIMEOUT, int)
 
 # =============================================================================
 # 配置验证
